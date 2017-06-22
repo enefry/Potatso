@@ -7,23 +7,41 @@
 //
 
 #import "TunnelInterface.h"
-#import <netinet/ip.h>
-#import "ipv4/lwip/ip4.h"
-#import "lwip/udp.h"
-#import "lwip/ip.h"
-#import <arpa/inet.h>
-#import "inet_chksum.h"
-#import "tun2socks/tun2socks.h"
+#include "inet_chksum.h"
+#include "ipv4/lwip/ip4.h"
+#include "lwip/udp.h"
+#include "lwip/ip.h"
+#include "misc/socks_proto.h"
+#include "system/BAddr.h"
+#include "tun2socks/tun2socks.h"
 @import CocoaAsyncSocket;
 
 #define kTunnelInterfaceErrorDomain [NSString stringWithFormat:@"%@.TunnelInterface", [[NSBundle mainBundle] bundleIdentifier]]
 
+NSString* const LOCALHOST_IP = @"127.0.0.1";
+const NSTimeInterval UDP_TIMEOUT_SECS = 10;
+const uint32_t DNS_RESOLVER_IP_1 = 0x08080808;  // 8.8.8.8
+const uint32_t DNS_RESOLVER_IP_2 = 0x08080404;  // 8.8.4.4
+const uint16_t DNS_PORT = 53;
+const size_t DNS_HEADER_NUM_BYTES = 12;
+const size_t SOCKS_HEADER_NUM_BYTES = sizeof(struct socks_udp_header);
+
+typedef struct {
+    struct ip_hdr *ipHeader;
+    struct udp_hdr *udpHeader;
+    uint8_t *data;
+    size_t dataNumBytes;
+    BAddr srcAddress;
+    BAddr destAddress;
+} PacketMetadata;
+
 @interface TunnelInterface () <GCDAsyncUdpSocketDelegate>
 @property (nonatomic) NEPacketTunnelFlow *tunnelPacketFlow;
-@property (nonatomic) NSMutableDictionary *udpSession;
+@property (nonatomic) NSMutableDictionary *localAddrByDnsReqId;
 @property (nonatomic) GCDAsyncUdpSocket *udpSocket;
 @property (nonatomic) int readFd;
 @property (nonatomic) int writeFd;
+@property (nonatomic) uint16_t socksServerPort;
 @end
 
 @implementation TunnelInterface
@@ -40,7 +58,7 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _udpSession = [NSMutableDictionary dictionaryWithCapacity:5];
+        _localAddrByDnsReqId = [NSMutableDictionary dictionaryWithCapacity:10];
         _udpSocket = [[GCDAsyncUdpSocket alloc] initWithDelegate:self delegateQueue:dispatch_queue_create("udp", NULL)];
     }
     return self;
@@ -51,7 +69,7 @@
         return [NSError errorWithDomain:kTunnelInterfaceErrorDomain code:1 userInfo:@{NSLocalizedDescriptionKey: @"PacketTunnelFlow can't be nil."}];
     }
     [TunnelInterface sharedInterface].tunnelPacketFlow = packetFlow;
-    
+
     NSError *error;
     GCDAsyncUdpSocket *udpSocket = [TunnelInterface sharedInterface].udpSocket;
     [udpSocket bindToPort:0 error:&error];
@@ -62,7 +80,7 @@
     if (error) {
         return [NSError errorWithDomain:kTunnelInterfaceErrorDomain code:1 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"UDP bind fail(%@).", [error localizedDescription]]}];
     }
-    
+
     int fds[2];
     if (pipe(fds) < 0) {
         return [NSError errorWithDomain:kTunnelInterfaceErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Unable to pipe."}];
@@ -105,8 +123,10 @@
 }
 
 - (void)_startTun2Socks: (NSNumber *)socksServerPort {
-    char socks_server[50];
-    sprintf(socks_server, "127.0.0.1:%d", (int)([socksServerPort integerValue]));
+    self.socksServerPort = [socksServerPort intValue];
+    NSString* socksServerAddress = [NSString stringWithFormat:@"%@:%d", LOCALHOST_IP,
+                                    self.socksServerPort];
+    char* socks_server = (char *)[socksServerAddress cStringUsingEncoding:kCFStringEncodingUTF8];
 #if TCP_DATA_LOG_ENABLE
     char *log_lvel = "debug";
 #else
@@ -138,80 +158,136 @@
 }
 
 - (void)handleUDPPacket: (NSData *)packet {
-    uint8_t *data = (uint8_t *)packet.bytes;
-    int data_len = (int)packet.length;
-    struct ip_hdr *iphdr = (struct ip_hdr *)data;
-    uint8_t version = IPH_V(iphdr);
-
-    switch (version) {
-        case 4: {
-            uint16_t iphdr_hlen = IPH_HL(iphdr) * 4;
-            data = data + iphdr_hlen;
-            data_len -= iphdr_hlen;
-            struct udp_hdr *udphdr = (struct udp_hdr *)data;
-            
-            data = data + sizeof(struct udp_hdr *);
-            data_len -= sizeof(struct udp_hdr *);
-            
-            NSData *outData = [[NSData alloc] initWithBytes:data length:data_len];
-            struct in_addr dest = { iphdr->dest.addr };
-            NSString *destHost = [NSString stringWithUTF8String:inet_ntoa(dest)];
-            NSString *key = [self strForHost:iphdr->dest.addr port:udphdr->dest];
-            NSString *value = [self strForHost:iphdr->src.addr port:udphdr->src];;
-            self.udpSession[key] = value;
-            [self.udpSocket sendData:outData toHost:destHost port:ntohs(udphdr->dest) withTimeout:30 tag:0];
-        } break;
-        case 6: {
-            
-        } break;
+    PacketMetadata metadata = [self parseIpPacketMetadata:packet];
+    if (![self isDnsPacket:&metadata]) {
+        return NSLog(@"Dropping non-DNS UDP packet.");
     }
+    uint16_t dnsRequestId = [self getDnsRequestId:metadata.data];
+    [self.localAddrByDnsReqId setObject:[self encodeIpAddress:&metadata.srcAddress]
+                                 forKey:[NSString stringWithFormat:@"%d", dnsRequestId]];
+
+    struct socks_udp_header socksHeader = { .rsv = 0, .frag = 0, .atyp = SOCKS_ATYP_IPV4,
+                                            .address = { .addr = metadata.ipHeader->dest.addr,
+                                                         .port = metadata.udpHeader->dest }};
+    size_t packetNumBytes = SOCKS_HEADER_NUM_BYTES + metadata.dataNumBytes;
+    uint8_t socksPacket[packetNumBytes];
+    memset(socksPacket, 0, packetNumBytes);
+    memcpy(socksPacket, &socksHeader, SOCKS_HEADER_NUM_BYTES);
+    memcpy(socksPacket + SOCKS_HEADER_NUM_BYTES, metadata.data, metadata.dataNumBytes);
+
+    NSData* packetData = [[NSData alloc] initWithBytes:socksPacket length:packetNumBytes];
+    [self.udpSocket sendData:packetData toHost:LOCALHOST_IP port:self.socksServerPort
+                 withTimeout:UDP_TIMEOUT_SECS
+                         tag:dnsRequestId];
 }
 
 - (void)udpSocket:(GCDAsyncUdpSocket *)sock didReceiveData:(NSData *)data fromAddress:(NSData *)address withFilterContext:(id)filterContext {
-    const struct sockaddr_in *addr = (const struct sockaddr_in *)[address bytes];
-    ip_addr_p_t dest ={ addr->sin_addr.s_addr };
-    in_port_t dest_port = addr->sin_port;
-    NSString *strHostPort = self.udpSession[[self strForHost:dest.addr port:dest_port]];
-    NSArray *hostPortArray = [strHostPort componentsSeparatedByString:@":"];
-    int src_ip = [hostPortArray[0] intValue];
-    int src_port = [hostPortArray[1] intValue];
-    uint8_t *bytes = (uint8_t *)[data bytes];
-    int bytes_len = (int)data.length;
-    int udp_length = sizeof(struct udp_hdr) + bytes_len;
-    int total_len = IP_HLEN + udp_length;
-    
-    ip_addr_p_t src = {src_ip};
-    struct ip_hdr *iphdr = generateNewIPHeader(IP_PROTO_UDP, dest, src, total_len);
-    
-    struct udp_hdr udphdr;
-    udphdr.src = dest_port;
-    udphdr.dest = src_port;
-    udphdr.len = hton16(udp_length);
-    udphdr.chksum = hton16(0);
-    
-    uint8_t *udpdata = malloc(sizeof(uint8_t) * udp_length);
-    memcpy(udpdata, &udphdr, sizeof(struct udp_hdr));
-    memcpy(udpdata + sizeof(struct udp_hdr), bytes, bytes_len);
-    
-    ip_addr_t odest = { dest.addr };
-    ip_addr_t osrc = { src_ip };
-    
-    struct pbuf *p_udp = pbuf_alloc(PBUF_TRANSPORT, udp_length, PBUF_RAM);
-    pbuf_take(p_udp, udpdata, udp_length);
-    
-    struct udp_hdr *new_udphdr = (struct udp_hdr *) p_udp->payload;
-    new_udphdr->chksum = inet_chksum_pseudo(p_udp, IP_PROTO_UDP, p_udp->len, &odest, &osrc);
-    
-    uint8_t *ipdata = malloc(sizeof(uint8_t) * total_len);
-    memcpy(ipdata, iphdr, IP_HLEN);
-    memcpy(ipdata + sizeof(struct ip_hdr), p_udp->payload, udp_length);
-    
-    NSData *outData = [[NSData alloc] initWithBytes:ipdata length:total_len];
-    free(ipdata);
-    free(iphdr);
-    free(udpdata);
-    pbuf_free(p_udp);
+    size_t dataNumBytes = data.length;
+    if (dataNumBytes < SOCKS_HEADER_NUM_BYTES) {
+        return NSLog(@"Received UDP packet payload of size %zu, expected > %zu. Dropping packet.",
+                     dataNumBytes, SOCKS_HEADER_NUM_BYTES);
+    }
+    uint8_t* packetBytes = (uint8_t *)data.bytes;
+
+    // Read the DNS request ID in order to retrieve the local destination address
+    uint8_t* dnsResponse = packetBytes + SOCKS_HEADER_NUM_BYTES;
+    uint16_t dnsRequestId = [self getDnsRequestId:dnsResponse];
+    NSString* dnsRequestIdStr = [NSString stringWithFormat:@"%d", dnsRequestId];
+    NSString* destAddressStr = [self.localAddrByDnsReqId objectForKey:dnsRequestIdStr];
+    if (destAddressStr == nil) {
+        return NSLog(@"Failed to retrieve mapping for DNS request ID %d", dnsRequestId);
+    }
+    [self.localAddrByDnsReqId removeObjectForKey:dnsRequestIdStr];  // Unmap entry
+    BAddr destAddress = [self parseIpAddressString:destAddressStr];
+    if (destAddress.type == BADDR_TYPE_NONE) {
+        return NSLog(@"Failed to parse source address for DNS request ID %d", dnsRequestId);
+    }
+    ip_addr_p_t destIp = { destAddress.ipv4.ip };
+
+    // Compute packet sizes
+    size_t dnsResponseNumBytes = dataNumBytes - SOCKS_HEADER_NUM_BYTES;
+    size_t udpPacketNumBytes = dnsResponseNumBytes + UDP_HLEN;
+    size_t ipPacketNumBytes = udpPacketNumBytes + IP_HLEN;
+
+    // Get source address from the SOCKS header
+    struct socks_udp_header* socksHeader = (struct socks_udp_header *)packetBytes;
+    ip_addr_p_t srcIp = { socksHeader->address.addr };
+    uint16_t srcPort = socksHeader->address.port;
+
+    // Synthesize UDP packet
+    struct udp_hdr udpHeader = { .src = srcPort, .dest = destAddress.ipv4.port,
+                                 .len = hton16(udpPacketNumBytes), .chksum = 0 };
+    uint8_t udpPacket[udpPacketNumBytes];
+    memset(udpPacket, 0, udpPacketNumBytes);
+    memcpy(udpPacket, &udpHeader, UDP_HLEN);
+    memcpy(udpPacket + UDP_HLEN, dnsResponse, dnsResponseNumBytes);
+
+    // Checksum UDP packet
+    struct pbuf *buffer = pbuf_alloc(PBUF_TRANSPORT, udpPacketNumBytes, PBUF_RAM);
+    pbuf_take(buffer, udpPacket, udpPacketNumBytes);
+    ip_addr_t src = { srcIp.addr }, dest = { destIp.addr };
+    struct udp_hdr* udpHeaderPtr = (struct udp_hdr *)udpPacket;  // Update checksum in packet buffer
+    udpHeaderPtr->chksum = inet_chksum_pseudo(buffer, IP_PROTO_UDP, buffer->len, &src, &dest);
+
+    // Synthesize IP packet
+    struct ip_hdr *ipHeader = generateNewIPHeader(IP_PROTO_UDP, srcIp, destIp, ipPacketNumBytes);
+    uint8_t ipdata[ipPacketNumBytes];
+    memset(ipdata, 0, ipPacketNumBytes);
+    memcpy(ipdata, ipHeader, IP_HLEN);
+    memcpy(ipdata + IP_HLEN, udpPacket, udpPacketNumBytes);
+
+    // Send packet
+    NSData *outData = [[NSData alloc] initWithBytes:ipdata length:ipPacketNumBytes];
+    free(ipHeader);
+    pbuf_free(buffer);
     [TunnelInterface writePacket:outData];
+}
+
+- (void)udpSocket:(GCDAsyncUdpSocket *)sock didNotSendDataWithTag:(long)tag dueToError:(NSError *)error {
+    NSString* dnsRequestId = [NSString stringWithFormat:@"%u", (uint16_t)tag];
+    NSLog(@"Failed to send DNS request ID %@ due to error: %@", dnsRequestId, error);
+    [self.localAddrByDnsReqId removeObjectForKey:dnsRequestId];
+}
+
+- (PacketMetadata)parseIpPacketMetadata:(NSData *)packet {
+    PacketMetadata metadata;
+    uint8_t *data = (uint8_t *)packet.bytes;
+    size_t dataNumBytes = (size_t)packet.length;
+
+    struct ip_hdr *ipHeader = (struct ip_hdr *)data;
+    uint16_t ipHeaderNumBytes = IPH_HL(ipHeader) * 4;
+    data = data + ipHeaderNumBytes;
+    dataNumBytes -= ipHeaderNumBytes;
+
+    struct udp_hdr *udpHeader = (struct udp_hdr *)data;
+    data += UDP_HLEN;
+    dataNumBytes -= UDP_HLEN;
+
+    metadata.srcAddress = BAddr_MakeIPv4(ipHeader->src.addr, udpHeader->src);
+    metadata.destAddress = BAddr_MakeIPv4(ipHeader->dest.addr, udpHeader->dest);
+
+    metadata.ipHeader = ipHeader;
+    metadata.udpHeader = udpHeader;
+    metadata.data = data;
+    metadata.dataNumBytes = dataNumBytes;
+    return metadata;
+}
+
+// Returns whether |metadata| is a DNS packet by matching the destination address to the VPN's DNS
+// resolvers and port 53.
+- (BOOL)isDnsPacket:(PacketMetadata *)metadata {
+    if (metadata->dataNumBytes < DNS_HEADER_NUM_BYTES) {
+        return NO;
+    }
+    uint16_t destPort = ntoh16(metadata->udpHeader->dest);
+    uint32_t destIp = metadata->destAddress.ipv4.ip;
+    return destPort == DNS_PORT && (DNS_RESOLVER_IP_1 == destIp ||
+                                    DNS_RESOLVER_IP_2 == destIp);
+}
+
+// Returns the first two bytes of the DNS header, which represent the DNS request ID.
+- (uint16_t) getDnsRequestId:(uint8_t *)dnsHeader {
+    return *((uint16_t *)dnsHeader);
 }
 
 struct ip_hdr *generateNewIPHeader(u8_t proto, ip_addr_p_t src, ip_addr_p_t dest, uint16_t total_len) {
@@ -230,10 +306,21 @@ struct ip_hdr *generateNewIPHeader(u8_t proto, ip_addr_p_t src, ip_addr_p_t dest
     return iphdr;
 }
 
-- (NSString *)strForHost: (int)host port: (int)port {
-    return [NSString stringWithFormat:@"%d:%d",host, port];
+- (NSString *)encodeIpAddress:(BAddr *)address {
+    return [NSString stringWithFormat:@"%d:%d", address->ipv4.ip, address->ipv4.port];
 }
 
-
+- (BAddr)parseIpAddressString:(NSString*)str {
+    if (str == nil) {
+        return BAddr_MakeNone();
+    }
+    NSArray* components = [str componentsSeparatedByString:@":"];
+    if (components.count < 2) {
+        return BAddr_MakeNone();
+    }
+    uint32_t ip = [components[0] intValue];
+    uint16_t port = [components[1] intValue];
+    return BAddr_MakeIPv4(ip, port);
+}
 
 @end
