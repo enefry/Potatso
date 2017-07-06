@@ -1,6 +1,7 @@
 [submodule "Library/ShadowPath/ShadowPath/shadowsocks-libev"]
 	path = Library/ShadowPath/ShadowPath/shadowsocks-libev
-	url = git@github.com:icodesign/shadowsocks-libev.git
+	url = git@github.com:uProxy/shadowsocks-libev-ios.git
+	branch = pthread-cleanup
 [submodule "Library/ShadowPath/ShadowPath/libmaxminddb"]
 	path = Library/ShadowPath/ShadowPath/libmaxminddb
 	url = git@github.com:haxpor/libmaxminddb.git
