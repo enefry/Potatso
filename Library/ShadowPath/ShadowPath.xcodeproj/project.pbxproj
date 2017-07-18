@@ -1996,6 +1996,7 @@
 		B8DEFD841CE9C923003FC706 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEFINES_MODULE = YES;
 				DYLIB_COMPATIBILITY_VERSION = 1;
@@ -2016,6 +2017,7 @@
 					"$(PROJECT_DIR)/ShadowPath/libopenssl/lib",
 					"$(PROJECT_DIR)/ShadowPath/libsodium-ios/lib",
 				);
+				ONLY_ACTIVE_ARCH = NO;
 				OTHER_CFLAGS = (
 					"-DHAVE_CONFIG_H",
 					"-DUSE_CRYPTO_OPENSSL",
@@ -2033,6 +2035,7 @@
 		B8DEFD851CE9C923003FC706 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
 				DEFINES_MODULE = YES;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
@@ -2052,6 +2055,7 @@
 					"$(PROJECT_DIR)/ShadowPath/libopenssl/lib",
 					"$(PROJECT_DIR)/ShadowPath/libsodium-ios/lib",
 				);
+				ONLY_ACTIVE_ARCH = NO;
 				OTHER_CFLAGS = (
 					"-DHAVE_CONFIG_H",
 					"-DUSE_CRYPTO_OPENSSL",
