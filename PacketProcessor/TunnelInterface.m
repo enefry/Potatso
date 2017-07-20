@@ -42,6 +42,7 @@ typedef struct {
 @property (nonatomic) int readFd;
 @property (nonatomic) int writeFd;
 @property (nonatomic) uint16_t socksServerPort;
+@property (nonatomic) dispatch_queue_t dispatchQueue;
 @end
 
 @implementation TunnelInterface
@@ -59,7 +60,7 @@ typedef struct {
     self = [super init];
     if (self) {
         _localAddrByDnsReqId = [NSMutableDictionary dictionaryWithCapacity:10];
-        _udpSocket = [[GCDAsyncUdpSocket alloc] initWithDelegate:self delegateQueue:dispatch_queue_create("udp", NULL)];
+        _dispatchQueue = dispatch_queue_create("udp", NULL);
     }
     return self;
 }
@@ -70,15 +71,10 @@ typedef struct {
     }
     [TunnelInterface sharedInterface].tunnelPacketFlow = packetFlow;
 
-    NSError *error;
-    GCDAsyncUdpSocket *udpSocket = [TunnelInterface sharedInterface].udpSocket;
-    [udpSocket bindToPort:0 error:&error];
-    if (error) {
-        return [NSError errorWithDomain:kTunnelInterfaceErrorDomain code:1 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"UDP bind fail(%@).", [error localizedDescription]]}];
-    }
-    [udpSocket beginReceiving:&error];
-    if (error) {
-        return [NSError errorWithDomain:kTunnelInterfaceErrorDomain code:1 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"UDP bind fail(%@).", [error localizedDescription]]}];
+    NSError *error = [[TunnelInterface sharedInterface] createUdpSocket];
+    if (error != nil) {
+      NSLog(@"Failed to create UDP socket: %@", error);
+      return error;
     }
 
     int fds[2];
@@ -89,6 +85,7 @@ typedef struct {
     [TunnelInterface sharedInterface].writeFd = fds[1];
     return nil;
 }
+
 
 + (void)startTun2Socks: (int)socksServerPort {
     [NSThread detachNewThreadSelector:@selector(_startTun2Socks:) toTarget:[TunnelInterface sharedInterface] withObject:@(socksServerPort)];
@@ -119,7 +116,31 @@ typedef struct {
         }
         [weakSelf processPackets];
     }];
+}
 
++ (NSError *)onNetworkConnectivityChange {
+  return [[TunnelInterface sharedInterface] createUdpSocket];
+}
+
+// Creates a UDP socket on the shared instance's dispatch queue and assigns the instance's |udpSocket| property.
+- (NSError *)createUdpSocket {
+  NSError *error;
+  GCDAsyncUdpSocket *udpSocket = [[GCDAsyncUdpSocket alloc] initWithDelegate:[TunnelInterface sharedInterface]
+                                                               delegateQueue:[TunnelInterface sharedInterface].dispatchQueue];
+  [udpSocket bindToPort:0 error:&error];
+  if (error) {
+    return [NSError errorWithDomain:kTunnelInterfaceErrorDomain code:1
+                           userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"UDP bind fail (%@).",
+                                                                 [error localizedDescription]]}];
+  }
+  [udpSocket beginReceiving:&error];
+  if (error) {
+    return [NSError errorWithDomain:kTunnelInterfaceErrorDomain code:1
+                           userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"UDP begin receive fail (%@).",
+                                                                 [error localizedDescription]]}];
+  }
+  self.udpSocket = udpSocket;
+  return nil;
 }
 
 - (void)_startTun2Socks: (NSNumber *)socksServerPort {

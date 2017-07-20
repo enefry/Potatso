@@ -16,6 +16,7 @@
 @interface TunnelInterface : NSObject
 + (TunnelInterface *)sharedInterface;
 + (NSError *)setupWithPacketTunnelFlow:(NEPacketTunnelFlow *)packetFlow;
++ (NSError *)onNetworkConnectivityChange;
 + (void)processPackets;
 + (void)writePacket: (NSData *)packet;
 + (void)startTun2Socks: (int)socksServerPort;
