@@ -852,12 +852,13 @@
 			path = lib;
 			sourceTree = "<group>";
 		};
-		B81888221D2C09DA00E41C89 /* libsodium-ios */ = {
+		B81888221D2C09DA00E41C89 /* libsodium */ = {
 			isa = PBXGroup;
 			children = (
 				B81888231D2C09DA00E41C89 /* include */,
 				B818885E1D2C09DA00E41C89 /* lib */,
 			);
+			name = libsodium;
 			path = "libsodium-ios";
 			sourceTree = "<group>";
 		};
@@ -1358,7 +1359,7 @@
 		B8DEFD7D1CE9C923003FC706 /* ShadowPath */ = {
 			isa = PBXGroup;
 			children = (
-				B81888221D2C09DA00E41C89 /* libsodium-ios */,
+				B81888221D2C09DA00E41C89 /* libsodium */,
 				B81887071D2BFC1B00E41C89 /* libopenssl */,
 				B8EAC5971D40D01C0046963C /* libmaxminddb */,
 				B86BFFF61D17DABA00613014 /* shadowsocks-libev */,
@@ -2027,7 +2028,9 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.wasin.ShadowPath;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
 				USER_HEADER_SEARCH_PATHS = "";
 			};
 			name = Debug;
@@ -2065,7 +2068,9 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.wasin.ShadowPath;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
 				USER_HEADER_SEARCH_PATHS = "";
 			};
 			name = Release;
