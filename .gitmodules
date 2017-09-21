@@ -1,13 +1,13 @@
 [submodule "Library/ShadowPath/ShadowPath/shadowsocks-libev"]
 	path = Library/ShadowPath/ShadowPath/shadowsocks-libev
-	url = git@github.com:uProxy/shadowsocks-libev-ios.git
+	url = git@github.com:enefry/ios-libss-dev.git
 	branch = pthread-cleanup
 [submodule "Library/ShadowPath/ShadowPath/libmaxminddb"]
 	path = Library/ShadowPath/ShadowPath/libmaxminddb
-	url = git@github.com:haxpor/libmaxminddb.git
+	url = git@github.com:enefry/libmaxminddb.git
 [submodule "Library/Eureka"]
 	path = Library/Eureka
-	url = git@github.com:haxpor/Eureka.git
+	url = git@github.com:enefry/Eureka.git
 [submodule "Library/CallbackURLKit"]
 	path = Library/CallbackURLKit
-	url = git@github.com:phimage/CallbackURLKit.git
+	url = git@github.com:enefry/CallbackURLKit.git
